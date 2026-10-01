@@ -129,6 +129,19 @@ func TestMux(t *testing.T) {
 	}
 }
 
+func TestTrackedConnUnwrap(t *testing.T) {
+	left, right := net.Pipe()
+	defer right.Close()
+	mux := &Mux{conns: make(map[*trackedConn]struct{})}
+	tracked := &trackedConn{Conn: left, mux: mux}
+	if tracked.Unwrap() != left {
+		t.Fatal("tracked connection did not expose its wrapped connection")
+	}
+	if err := tracked.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMux_Advertise(t *testing.T) {
 	// Setup muxer.
 	tcpListener := mustTCPListener("127.0.0.1:0")

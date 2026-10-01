@@ -285,6 +285,13 @@ type trackedConn struct {
 	once sync.Once
 }
 
+// Unwrap returns the connection accepted by the Mux. Consumers which need
+// transport-specific state, such as a TLS peer certificate, can recursively
+// unwrap without depending on this private wrapper type.
+func (c *trackedConn) Unwrap() net.Conn {
+	return c.Conn
+}
+
 // Close removes the connection from the Mux's tracking set and closes the
 // underlying connection. It is safe to call multiple times.
 func (c *trackedConn) Close() error {

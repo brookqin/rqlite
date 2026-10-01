@@ -18,6 +18,7 @@ import (
 type SwappableDB struct {
 	db            *DB
 	drv           *Driver
+	maxROConns    int
 	checkpointMgr *CheckpointManager
 	dbMu          sync.RWMutex
 }
@@ -42,6 +43,7 @@ func OpenSwappable(dbPath string, drv *Driver, fkEnabled, wal bool, maxROConns i
 	return &SwappableDB{
 		db:            db,
 		drv:           drv,
+		maxROConns:    maxROConns,
 		checkpointMgr: mgr,
 	}, nil
 }
@@ -70,6 +72,7 @@ func (s *SwappableDB) Swap(path string, fkConstraints, walEnabled bool) error {
 	if err != nil {
 		return fmt.Errorf("open SQLite file failed: %s", err)
 	}
+	db.SetMaxReadOnlyConns(s.maxROConns)
 	s.db = db
 	if err := s.checkpointMgr.Close(); err != nil {
 		return fmt.Errorf("failed to close checkpoint manager: %s", err)

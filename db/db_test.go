@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -253,9 +254,25 @@ func Test_SetMaxReadOnlyConns(t *testing.T) {
 	defer db.Close()
 
 	db.SetMaxReadOnlyConns(42)
+	connections := make([]*sql.Conn, 0, 4)
+	for range 4 {
+		conn, err := db.roDB.Conn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		connections = append(connections, conn)
+	}
+	for _, conn := range connections {
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	stats := db.ConnectionPoolStats(db.roDB)
 	if got, exp := stats.MaxOpenConnections, 42; got != exp {
 		t.Fatalf("incorrect max readonly conns, exp %d, got %d", exp, got)
+	}
+	if got, exp := stats.Idle, 4; got != exp {
+		t.Fatalf("incorrect idle readonly conns, exp %d, got %d", exp, got)
 	}
 }
 

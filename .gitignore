@@ -58,3 +58,6 @@ _testmain.go
 
 # IDEs
 *.vscode
+
+# Host-local Qiankun baseline artifacts
+.qiankun-baseline/

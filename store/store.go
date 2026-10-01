@@ -369,6 +369,10 @@ type Store struct {
 	// The Leader that actually appended the log entry is not necessarily the current Leader.
 	appendedAtTime *rsync.AtomicTime
 
+	// testApplyGate is a Qiankun downstream-only deterministic failure-test
+	// seam. It is deliberately unexported and is always nil in production.
+	testApplyGate fsmApplyGate
+
 	strongReadTerm atomic.Uint64 // Term of most recent Strong Read
 
 	dbModifiedTime *rsync.AtomicTime // Last time the database file was modified.
@@ -2540,6 +2544,9 @@ func (s *Store) fsmApply(l *raft.Log) (e any) {
 		s.firstLogAppliedT = time.Now()
 		s.logger.Printf("first log applied since node %s started, log at index %d", s.raftID, l.Index)
 	}
+	if s.testApplyGate != nil {
+		s.testApplyGate.BeforeApply(l.Index, l.Term)
+	}
 
 	cmd, mutated, r, err := func() (*proto.Command, bool, any, error) {
 		// Reset CDC streamer with the current log index before processing if CDC is enabled
@@ -2574,6 +2581,9 @@ func (s *Store) fsmApply(l *raft.Log) (e any) {
 	}()
 	if err != nil {
 		s.logger.Fatalf("fatal error applying command at index %d - aborting to prevent divergence between nodes: %s", l.Index, err)
+	}
+	if s.testApplyGate != nil {
+		s.testApplyGate.AfterApply(l.Index, l.Term)
 	}
 
 	if mutated {

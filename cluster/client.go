@@ -32,6 +32,8 @@ const (
 	protoBufferLengthSize = 8
 )
 
+var ErrClientClosed = errors.New("cluster client is closed")
+
 // CreateRaftDialer creates a dialer for connecting to other nodes' Raft service. If the cert and
 // key arguments are not set, then the returned dialer will not use TLS. If they are set then
 // the dialer will use TLS. A started CertMonitor will also be returned. The caller is responsible
@@ -83,6 +85,7 @@ type Client struct {
 
 	poolMu sync.RWMutex
 	pools  map[string]pool.Pool
+	closed bool
 
 	// Whitebox testing
 	numForcedNewConns atomic.Int32
@@ -100,6 +103,31 @@ func NewClient(dl Dialer, t time.Duration) *Client {
 		timeout: t,
 		pools:   make(map[string]pool.Pool),
 	}
+}
+
+// Close closes all pooled connections and makes the Client unusable for
+// further remote requests. It is safe to call Close more than once.
+func (c *Client) Close() error {
+	c.poolMu.Lock()
+	if c.closed {
+		c.poolMu.Unlock()
+		return nil
+	}
+	c.closed = true
+	pools := c.pools
+	c.pools = nil
+	c.poolMu.Unlock()
+
+	for _, p := range pools {
+		p.Close()
+	}
+
+	c.localMu.Lock()
+	c.localNodeAddr = ""
+	c.localServ = nil
+	c.localVersion = ""
+	c.localMu.Unlock()
+	return nil
 }
 
 // SetLocal informs the client instance of the node address for the node
@@ -141,10 +169,7 @@ func (c *Client) GetNodeMeta(ctx context.Context, nodeAddr string, retries int, 
 	if c.localNodeAddr == nodeAddr && c.localServ != nil {
 		// Serve it locally!
 		stats.Add(numGetNodeAPIRequestLocal, 1)
-		return &proto.NodeMeta{
-			Url:     c.localServ.GetNodeAPIURL(),
-			Version: c.GetLocalVersion(),
-		}, nil
+		return c.localServ.GetNodeMeta()
 	}
 
 	command := &proto.Command{
@@ -728,6 +753,10 @@ func (c *Client) dialWithOption(nodeAddr string, forceNew bool) (net.Conn, error
 	var ok bool
 
 	c.poolMu.RLock()
+	if c.closed {
+		c.poolMu.RUnlock()
+		return nil, ErrClientClosed
+	}
 	pl, ok = c.pools[nodeAddr]
 	c.poolMu.RUnlock()
 
@@ -736,6 +765,9 @@ func (c *Client) dialWithOption(nodeAddr string, forceNew bool) (net.Conn, error
 		if err := func() error {
 			c.poolMu.Lock()
 			defer c.poolMu.Unlock()
+			if c.closed {
+				return ErrClientClosed
+			}
 			pl, ok = c.pools[nodeAddr]
 			if ok {
 				return nil // Pool was inserted just after we checked.

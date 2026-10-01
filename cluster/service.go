@@ -167,6 +167,21 @@ type CredentialStore interface {
 	AA(username, password, perm string) bool
 }
 
+// NodeRequestAuthorizer authorizes the node identity and advertised address
+// carried by bootstrap and join requests against the connection which sent the
+// request. Implementations may inspect transport-specific peer identity by
+// unwrapping conn, but must not retain conn after this method returns.
+type NodeRequestAuthorizer interface {
+	AuthorizeNodeRequest(conn net.Conn, nodeID, address string) error
+}
+
+// NodeMetaProvider supplies optional, application-owned, short-lived node
+// metadata. Implementations must return an immutable snapshot which the Service
+// clones before adding its authoritative URL, version, and commit index.
+type NodeMetaProvider interface {
+	NodeMeta() *proto.NodeMeta
+}
+
 // Service provides information about the node and cluster.
 type Service struct {
 	ln   net.Listener // Incoming connections to the service
@@ -175,7 +190,9 @@ type Service struct {
 	db  Database // The queryable system.
 	mgr Manager  // The cluster management system.
 
-	credentialStore CredentialStore
+	credentialStore  CredentialStore
+	nodeAuthorizer   NodeRequestAuthorizer
+	nodeMetaProvider NodeMetaProvider
 
 	mu      sync.RWMutex
 	https   bool              // Serving HTTPS?
@@ -322,6 +339,45 @@ func (s *Service) SetConnectionLimit(n int) error {
 	return nil
 }
 
+// SetNodeRequestAuthorizer sets the optional authorizer for Notify and Join
+// requests. It must be called before Open.
+func (s *Service) SetNodeRequestAuthorizer(authorizer NodeRequestAuthorizer) error {
+	if s.open.Is() {
+		return ErrServiceOpen
+	}
+	s.nodeAuthorizer = authorizer
+	return nil
+}
+
+// SetNodeMetaProvider sets the optional application metadata provider. It must
+// be called before Open.
+func (s *Service) SetNodeMetaProvider(provider NodeMetaProvider) error {
+	if s.open.Is() {
+		return ErrServiceOpen
+	}
+	s.nodeMetaProvider = provider
+	return nil
+}
+
+// GetNodeMeta returns one detached metadata snapshot. Service-owned fields
+// always override values supplied by the optional provider.
+func (s *Service) GetNodeMeta() (*proto.NodeMeta, error) {
+	commitIndex, err := s.mgr.CommitIndex()
+	if err != nil {
+		return nil, err
+	}
+	meta := &proto.NodeMeta{}
+	if s.nodeMetaProvider != nil {
+		if provided := s.nodeMetaProvider.NodeMeta(); provided != nil {
+			meta = pb.Clone(provided).(*proto.NodeMeta)
+		}
+	}
+	meta.Url = s.GetNodeAPIURL()
+	meta.CommitIndex = commitIndex
+	meta.Version = s.GetVersion()
+	return meta, nil
+}
+
 func (s *Service) serve() error {
 	for {
 		conn, err := s.ln.Accept()
@@ -358,6 +414,17 @@ func (s *Service) checkCommandPermAll(c *proto.Command, perms ...string) bool {
 		if !s.credentialStore.AA(c.Credentials.GetUsername(), c.Credentials.GetPassword(), perm) {
 			return false
 		}
+	}
+	return true
+}
+
+func (s *Service) authorizeNodeRequest(conn net.Conn, nodeID, address string) bool {
+	if s.nodeAuthorizer == nil {
+		return true
+	}
+	if err := s.nodeAuthorizer.AuthorizeNodeRequest(conn, nodeID, address); err != nil {
+		s.logger.Printf("node request authorization failed: %s", err)
+		return false
 	}
 	return true
 }
@@ -399,16 +466,12 @@ func (s *Service) handleConn(conn net.Conn) {
 		switch c.Type {
 		case proto.Command_COMMAND_TYPE_GET_NODE_META:
 			stats.Add(numGetNodeAPIRequest, 1)
-			ci, err := s.mgr.CommitIndex()
+			meta, err := s.GetNodeMeta()
 			if err != nil {
 				conn.Close()
 				return
 			}
-			p, err = pb.Marshal(&proto.NodeMeta{
-				Url:         s.GetNodeAPIURL(),
-				CommitIndex: ci,
-				Version:     s.GetVersion(),
-			})
+			p, err = pb.Marshal(meta)
 			if err != nil {
 				conn.Close()
 				return
@@ -601,6 +664,8 @@ func (s *Service) handleConn(conn net.Conn) {
 				resp.Error = "NotifyRequest is nil"
 			} else if !s.checkCommandPerm(c, auth.PermJoin) {
 				resp.Error = "unauthorized"
+			} else if !s.authorizeNodeRequest(conn, nr.Id, nr.Address) {
+				resp.Error = "unauthorized"
 			} else {
 				if err := s.mgr.Notify(nr); err != nil {
 					resp.Error = err.Error()
@@ -621,7 +686,9 @@ func (s *Service) handleConn(conn net.Conn) {
 				if (jr.Voter && s.checkCommandPerm(c, auth.PermJoin)) ||
 					(!jr.Voter && s.checkCommandPerm(c, auth.PermJoinReadOnly)) ||
 					(!jr.Voter && s.checkCommandPerm(c, auth.PermJoinReadReplica)) {
-					if err := s.mgr.Join(jr); err != nil {
+					if !s.authorizeNodeRequest(conn, jr.Id, jr.Address) {
+						resp.Error = "unauthorized"
+					} else if err := s.mgr.Join(jr); err != nil {
 						resp.Error = err.Error()
 						if err.Error() == "not leader" {
 							laddr, err := s.mgr.LeaderAddr()

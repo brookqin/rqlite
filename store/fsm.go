@@ -13,6 +13,13 @@ import (
 
 var fsmSnapshotErrLogger = log.New(os.Stderr, "[fsm-snapshot] ", log.LstdFlags)
 
+// fsmApplyGate is implemented only by downstream white-box tests. It is kept
+// unexported so production assembly cannot pause the Raft FSM.
+type fsmApplyGate interface {
+	BeforeApply(index, term uint64)
+	AfterApply(index, term uint64)
+}
+
 // FSM is a wrapper around the Store which implements raft.FSM.
 type FSM struct {
 	s *Store

@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -20,6 +21,38 @@ func Test_NewClient(t *testing.T) {
 	c := NewClient(nil, 0)
 	if c == nil {
 		t.Fatal("expected client, got nil")
+	}
+}
+
+func Test_ClientClose(t *testing.T) {
+	srv := servicetest.NewService()
+	srv.Handler = func(conn net.Conn) {
+		command := readCommand(conn)
+		if command == nil {
+			return
+		}
+		payload, err := pb.Marshal(&proto.NodeMeta{Url: "http://localhost:1234", Version: "1.0.0"})
+		if err != nil {
+			t.Errorf("marshal node metadata: %v", err)
+			return
+		}
+		writeBytesWithLength(conn, payload)
+	}
+	srv.Start()
+	defer srv.Close()
+
+	client := NewClient(&simpleDialer{}, time.Second)
+	if _, err := client.GetNodeMeta(context.Background(), srv.Addr(), noRetries, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+	if _, err := client.GetNodeMeta(context.Background(), srv.Addr(), noRetries, time.Second); !errors.Is(err, ErrClientClosed) {
+		t.Fatalf("expected ErrClientClosed, got %v", err)
 	}
 }
 

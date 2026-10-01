@@ -64,6 +64,8 @@ message QueryRows {
 	repeated Values values = 3;
 	string error = 4;
 	double time = 5;
+	int32 error_code = 6;
+	int32 error_extended_code = 7;
 }
 
 message ExecuteRequest {
@@ -96,6 +98,8 @@ message ExecuteQueryResponse {
 		ExecuteResult e = 2;
 		string error = 3;
 	}
+	int32 error_code = 5;
+	int32 error_extended_code = 6;
 }
 
 message BackupRequest {

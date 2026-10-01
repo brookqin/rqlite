@@ -1341,6 +1341,9 @@ func Test_DB_SimpleFailingStatements_Execute(t *testing.T) {
 	if exp, got := `[{"error":"UNIQUE constraint failed: foo.id"}]`, asJSON(r); exp != got {
 		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
 	}
+	if len(r) != 1 || r[0].GetErrorCode() != 19 || r[0].GetErrorExtendedCode()&0xff != 19 {
+		t.Fatalf("unexpected structured constraint codes: %#v", r)
+	}
 
 	r, err = db.ExecuteStringStmt(`utter nonsense`)
 	if err != nil {
@@ -1361,6 +1364,9 @@ func Test_DB_SimpleFailingStatements_Query(t *testing.T) {
 	}
 	if exp, got := `[{"error":"no such table: bar"}]`, asJSON(ro); exp != got {
 		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
+	}
+	if len(ro) != 1 || ro[0].GetErrorCode() != 1 || ro[0].GetErrorExtendedCode() != 1 {
+		t.Fatalf("unexpected structured query error codes: %#v", ro)
 	}
 
 	ro, err = db.QueryStringStmt(`SELECTxx * FROM foo`)

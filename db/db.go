@@ -356,6 +356,9 @@ func OpenWithDriver(drv *Driver, dbPath string, fkEnabled, wal bool) (retDB *DB,
 // details.
 func (db *DB) SetMaxReadOnlyConns(n int) {
 	db.roDB.SetMaxOpenConns(n)
+	if n > 0 {
+		db.roDB.SetMaxIdleConns(n)
+	}
 }
 
 // PreUpdateHookCallback is a callback function that is called before a row is modified
@@ -1188,6 +1191,22 @@ type execerQueryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
+func setExecuteQueryError(response *command.ExecuteQueryResponse, err error) {
+	response.Result = &command.ExecuteQueryResponse_Error{Error: err.Error()}
+	if sqliteErr := NewSQLiteErrorFromError(err); sqliteErr != nil {
+		response.ErrorCode = sqliteErr.Code
+		response.ErrorExtendedCode = sqliteErr.ExtendedCode
+	}
+}
+
+func setQueryRowsError(rows *command.QueryRows, err error) {
+	rows.Error = err.Error()
+	if sqliteErr := NewSQLiteErrorFromError(err); sqliteErr != nil {
+		rows.ErrorCode = sqliteErr.Code
+		rows.ErrorExtendedCode = sqliteErr.ExtendedCode
+	}
+}
+
 func (db *DB) executeWithConn(ctx context.Context, req *command.Request, xTime bool, conn *sql.Conn) (allResults []*command.ExecuteQueryResponse, retErr error) {
 	defer func() { retErr = classifyError(retErr) }()
 
@@ -1219,9 +1238,7 @@ func (db *DB) executeWithConn(ctx context.Context, req *command.Request, xTime b
 		if result == nil {
 			result = &command.ExecuteQueryResponse{}
 		}
-		result.Result = &command.ExecuteQueryResponse_Error{
-			Error: err.Error(),
-		}
+		setExecuteQueryError(result, err)
 		allResults = append(allResults, result)
 		if tx != nil {
 			preserveFatalError(&retErr, tx.Rollback())
@@ -1267,9 +1284,7 @@ func (db *DB) executeStmtWithConn(ctx context.Context, stmt *command.Statement, 
 		if retErr != nil {
 			retErr = classifyError(rewriteContextTimeout(retErr, ErrExecuteTimeout))
 			if res != nil {
-				res.Result = &command.ExecuteQueryResponse_Error{
-					Error: retErr.Error(),
-				}
+				setExecuteQueryError(res, retErr)
 			}
 		} else if res != nil && res.GetError() == "" && res.GetQ().GetError() == "" {
 			res.Mutated = true
@@ -1280,9 +1295,7 @@ func (db *DB) executeStmtWithConn(ctx context.Context, stmt *command.Statement, 
 
 	parameters, err := parametersToValues(stmt.Parameters)
 	if err != nil {
-		response.Result = &command.ExecuteQueryResponse_Error{
-			Error: err.Error(),
-		}
+		setExecuteQueryError(response, err)
 		return response, err
 	}
 
@@ -1296,9 +1309,7 @@ func (db *DB) executeStmtWithConn(ctx context.Context, stmt *command.Statement, 
 		stats.Add(numExecutionsForceQueries, 1)
 		rows, err := db.queryStmtWithConn(ctx, stmt, xTime, eq)
 		if err != nil {
-			response.Result = &command.ExecuteQueryResponse_Error{
-				Error: err.Error(),
-			}
+			setExecuteQueryError(response, err)
 			return response, err
 		}
 		response.Result = &command.ExecuteQueryResponse_Q{
@@ -1307,9 +1318,7 @@ func (db *DB) executeStmtWithConn(ctx context.Context, stmt *command.Statement, 
 	} else {
 		result, err := eq.ExecContext(ctx, stmt.Sql, parameters...)
 		if err != nil {
-			response.Result = &command.ExecuteQueryResponse_Error{
-				Error: err.Error(),
-			}
+			setExecuteQueryError(response, err)
 			return response, err
 		}
 		if ctx.Err() != nil {
@@ -1321,17 +1330,13 @@ func (db *DB) executeStmtWithConn(ctx context.Context, stmt *command.Statement, 
 
 		lid, err := result.LastInsertId()
 		if err != nil {
-			response.Result = &command.ExecuteQueryResponse_Error{
-				Error: err.Error(),
-			}
+			setExecuteQueryError(response, err)
 			return response, err
 		}
 
 		ra, err := result.RowsAffected()
 		if err != nil {
-			response.Result = &command.ExecuteQueryResponse_Error{
-				Error: err.Error(),
-			}
+			setExecuteQueryError(response, err)
 			return response, err
 		}
 		tf := float64(0)
@@ -1436,9 +1441,8 @@ func (db *DB) queryWithConn(ctx context.Context, req *command.Request, xTime boo
 			if se != nil && se.ReadOnlyError() {
 				err = ErrQueryWrite
 			}
-			rows = &command.QueryRows{
-				Error: err.Error(),
-			}
+			rows = &command.QueryRows{}
+			setQueryRowsError(rows, err)
 		}
 		if req.QualifyColumns && rows != nil && rows.Error == "" {
 			if qErr := qualifyRowColumns(conn, stmt.Sql, rows); qErr != nil {
@@ -1459,7 +1463,7 @@ func (db *DB) queryStmtWithConn(ctx context.Context, stmt *command.Statement, xT
 		if retErr != nil {
 			retErr = classifyError(rewriteContextTimeout(retErr, ErrQueryTimeout))
 			if retRows != nil {
-				retRows.Error = retErr.Error()
+				setQueryRowsError(retRows, retErr)
 			}
 		}
 	}()
@@ -1470,14 +1474,14 @@ func (db *DB) queryStmtWithConn(ctx context.Context, stmt *command.Statement, xT
 	parameters, err := parametersToValues(stmt.Parameters)
 	if err != nil {
 		stats.Add(numQueryErrors, 1)
-		rows.Error = err.Error()
+		setQueryRowsError(rows, err)
 		return rows, nil
 	}
 
 	rs, err := q.QueryContext(ctx, stmt.Sql, parameters...)
 	if err != nil {
 		stats.Add(numQueryErrors, 1)
-		rows.Error = err.Error()
+		setQueryRowsError(rows, err)
 		return rows, err
 	}
 	defer func() { preserveFatalError(&retErr, rs.Close()) }()
@@ -1638,11 +1642,9 @@ func (db *DB) RequestWithContext(ctx context.Context, req *command.Request, xTim
 
 		ro, err := db.StmtReadOnlyWithConn(ss, conn)
 		if err != nil {
-			eqResponse = append(eqResponse, &command.ExecuteQueryResponse{
-				Result: &command.ExecuteQueryResponse_Error{
-					Error: err.Error(),
-				},
-			})
+			response := &command.ExecuteQueryResponse{}
+			setExecuteQueryError(response, err)
+			eqResponse = append(eqResponse, response)
 			if abortOnError(err) {
 				break
 			}
@@ -2141,13 +2143,9 @@ func checkpointDB(rwDB *sql.DB, mode CheckpointMode) (ok, pages, moved int, err 
 
 func createEQQueryResponse(rows *command.QueryRows, err error) *command.ExecuteQueryResponse {
 	if err != nil {
-		return &command.ExecuteQueryResponse{
-			Result: &command.ExecuteQueryResponse_Q{
-				Q: &command.QueryRows{
-					Error: err.Error(),
-				},
-			},
-		}
+		rows := &command.QueryRows{}
+		setQueryRowsError(rows, err)
+		return &command.ExecuteQueryResponse{Result: &command.ExecuteQueryResponse_Q{Q: rows}}
 	}
 	return &command.ExecuteQueryResponse{
 		Result: &command.ExecuteQueryResponse_Q{

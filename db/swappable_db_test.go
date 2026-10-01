@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"os"
 	"testing"
 
@@ -33,6 +34,50 @@ func Test_OpenSwappable_Success(t *testing.T) {
 	// Check the paths of the underlying database
 	if swappableDB.Path() != path {
 		t.Fatalf("expected swappable database path to be %s, got %s", path, swappableDB.Path())
+	}
+}
+
+func TestSwappableDBPreservesReadOnlyPoolLimitAfterSwap(t *testing.T) {
+	sourcePath := mustTempPath()
+	defer os.Remove(sourcePath)
+	sourceDB, err := Open(sourcePath, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExecute(sourceDB, "CREATE TABLE items (id INTEGER PRIMARY KEY)")
+	if err := sourceDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	targetPath := mustTempPath()
+	defer os.Remove(targetPath)
+	swappableDB, err := OpenSwappable(targetPath, nil, false, false, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer swappableDB.Close()
+	if err := swappableDB.Swap(sourcePath, false, false); err != nil {
+		t.Fatal(err)
+	}
+	connections := make([]*sql.Conn, 0, 4)
+	for range 4 {
+		conn, err := swappableDB.db.roDB.Conn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		connections = append(connections, conn)
+	}
+	for _, conn := range connections {
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats := swappableDB.db.ConnectionPoolStats(swappableDB.db.roDB)
+	if stats.MaxOpenConnections != 4 {
+		t.Fatalf("max read-only connections after swap = %d", stats.MaxOpenConnections)
+	}
+	if stats.Idle != 4 {
+		t.Fatalf("idle read-only connections after swap = %d", stats.Idle)
 	}
 }
 

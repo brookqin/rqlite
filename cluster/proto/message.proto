@@ -14,6 +14,12 @@ message NodeMeta {
     string url = 1;
     uint64 commit_index = 2;
     string version = 3;
+    string node_id = 4;
+    string runtime_mode = 5;
+    bool sealed = 6;
+    bool ready = 7;
+    uint64 applied_index = 8;
+    string schema_checksum = 9;
 }
 
 message Command {
